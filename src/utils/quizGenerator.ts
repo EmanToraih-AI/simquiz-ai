@@ -16,33 +16,8 @@ interface Quiz {
   questions: QuizQuestion[];
 }
 
-function extractVideoId(url: string): string {
-  const match = url.match(/(?:youtu\.be\/|youtube\.com(?:\/embed\/|\/v\/|\/watch\?v=|\/watch\?.+&v=))([^&\n?#]+)/);
-  if (!match?.[1]) throw new Error('Invalid YouTube URL');
-  return match[1];
-}
-
-async function getYouTubeTranscript(videoUrl: string): Promise<string> {
-  const videoId = extractVideoId(videoUrl);
-
-  try {
-    const response = await fetch(
-      `https://www.youtube.com/api/timedtext?v=${videoId}&lang=en&fmt=json3`
-    );
-
-    if (!response.ok) {
-      throw new Error('Transcript not available');
-    }
-
-    const data = await response.json();
-    return data.events
-      ?.filter((e: any) => e.segs)
-      .map((e: any) => e.segs.map((s: any) => s.utf8).join(''))
-      .join(' ') || '';
-  } catch {
-    throw new Error('Could not fetch transcript. Video may not have captions or may be private.');
-  }
-}
+// YouTube transcript fetching is now handled server-side in the Edge Function
+// This avoids CORS issues and allows YouTube URLs to work automatically!
 
 export async function generateQuiz(
   videoUrl: string | null,
@@ -51,76 +26,84 @@ export async function generateQuiz(
   directTranscript?: string
 ): Promise<Quiz> {
 
-  let transcript: string;
+  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+  const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-  if (directTranscript) {
-    transcript = directTranscript;
-  } else if (videoUrl) {
-    transcript = await getYouTubeTranscript(videoUrl);
-  } else {
-    throw new Error('Either videoUrl or directTranscript must be provided');
+  if (!supabaseUrl || !supabaseAnonKey) {
+    throw new Error('Supabase URL and Anon Key are required. Please add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to your .env file.');
   }
 
-  const isComprehensive = coverageMode === 'comprehensive';
+  try {
+    // Call Supabase Edge Function which will:
+    // 1. Fetch YouTube transcript server-side (if videoUrl provided) - no CORS issues!
+    // 2. Generate the quiz using Anthropic API
+    const response = await fetch(`${supabaseUrl}/functions/v1/generate-quiz`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${supabaseAnonKey}`,
+        'apikey': supabaseAnonKey
+      },
+      body: JSON.stringify({
+        videoUrl: videoUrl || undefined,
+        transcript: directTranscript || undefined,
+        numQuestions,
+        coverageMode,
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 4000
+      })
+    });
 
-  const prompt = `You are an expert medical educator creating ${isComprehensive ? 'comprehensive' : 'video-specific'} assessment questions.
-
-TRANSCRIPT: ${transcript.substring(0, 3000)}${transcript.length > 3000 ? '...' : ''}
-
-${isComprehensive ? `
-COMPREHENSIVE MODE - Generate ${numQuestions} questions:
-- 40% test what happened in this video
-- 60% test broader best practices for topics mentioned
-Example: If video mentions "PPE" → ask "What did learner forget?" (video) AND "Why are gloves important in all patient care?" (comprehensive)
-` : `
-VIDEO-ONLY MODE - Generate ${numQuestions} questions:
-- Questions ONLY answerable by watching this specific video
-- Focus on specific details, names, what was said/done
-- Do NOT ask general knowledge questions
-`}
-
-Return ONLY valid JSON:
-{
-  "title": "Quiz title",
-  "topics": ["topic1", "topic2"],
-  "questions": [
-    {
-      "id": 1,
-      "question": "Question text?",
-      "options": ["A) ...", "B) ...", "C) ...", "D) ..."],
-      "correctAnswer": 0,
-      "explanation": "Clear explanation",
-      "difficulty": "basic",
-      "source": "${isComprehensive ? 'video or expanded' : 'video'}"
+    if (!response.ok) {
+      const errorText = await response.text();
+      let errorMessage = `API Error: ${response.status} ${response.statusText}`;
+      try {
+        const errorData = JSON.parse(errorText);
+        // Check if it's an Anthropic API error (function is working, but Anthropic rejected)
+        if (errorData.error && typeof errorData.error === 'string' && errorData.error.includes('Anthropic API error')) {
+          // Extract the actual Anthropic error
+          const anthropicErrorMatch = errorData.error.match(/Anthropic API error: \d+ ({.*})/);
+          if (anthropicErrorMatch) {
+            try {
+              const anthropicErr = JSON.parse(anthropicErrorMatch[1]);
+              if (anthropicErr.error?.message) {
+                errorMessage = `Anthropic API: ${anthropicErr.error.message}`;
+              }
+            } catch {
+              errorMessage = errorData.error;
+            }
+          } else {
+            errorMessage = errorData.error;
+          }
+        } else {
+          errorMessage = errorData.error || errorMessage;
+        }
+      } catch {
+        // Use default error message
+      }
+      
+      // Only show "function not found" if we get a 404 AND no response body (true 404)
+      if (response.status === 404 && (!errorText || errorText.trim() === '')) {
+        throw new Error('Supabase Edge Function not found. Please deploy the generate-quiz function. See supabase/functions/generate-quiz/ for the function code.');
+      } else if (response.status === 500 && errorMessage.includes('ANTHROPIC_API_KEY')) {
+        throw new Error('Anthropic API key not configured in Supabase. Please add ANTHROPIC_API_KEY to your Supabase project secrets.');
+      }
+      
+      throw new Error(errorMessage);
     }
-  ]
-}
 
-Generate ${numQuestions} questions now. No other text.`;
+    const data = await response.json();
+    const content = data.content[0].text;
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
 
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': ANTHROPIC_API_KEY || '',
-      'anthropic-version': '2023-06-01'
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 4000,
-      messages: [{ role: 'user', content: prompt }]
-    })
-  });
+    if (!jsonMatch) throw new Error('Invalid AI response format');
 
-  if (!response.ok) {
-    throw new Error(`API Error: ${response.statusText}`);
+    return JSON.parse(jsonMatch[0]);
+  } catch (error) {
+    if (error instanceof TypeError && error.message.includes('fetch')) {
+      throw new Error('Network error: Unable to reach the API. Please check your internet connection and that the Supabase Edge Function is deployed.');
+    }
+    throw error;
   }
 
-  const data = await response.json();
-  const content = data.content[0].text;
-  const jsonMatch = content.match(/\{[\s\S]*\}/);
-
-  if (!jsonMatch) throw new Error('Invalid AI response');
-
-  return JSON.parse(jsonMatch[0]);
 }

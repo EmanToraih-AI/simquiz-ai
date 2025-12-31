@@ -1,7 +1,9 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { Sparkles, Loader2, CheckCircle2, XCircle, ArrowLeft, AlertCircle } from 'lucide-react';
 import { generateQuiz } from '../utils/quizGenerator';
+import { useAuth } from '../lib/AuthContext';
+import { saveQuizToDatabase, saveQuizAttempt } from '../utils/quizDatabase';
 
 interface Question {
   id: number;
@@ -19,6 +21,7 @@ interface QuizResult {
 }
 
 export default function DemoPage() {
+  const { user } = useAuth();
   const [inputMode, setInputMode] = useState<'youtube' | 'transcript'>('youtube');
   const [youtubeUrl, setYoutubeUrl] = useState('');
   const [transcript, setTranscript] = useState('');
@@ -34,6 +37,9 @@ export default function DemoPage() {
   const [quizResults, setQuizResults] = useState<QuizResult[]>([]);
   const [showResults, setShowResults] = useState(false);
   const [questions, setQuestions] = useState<Question[]>([]);
+  const [quizId, setQuizId] = useState<string | null>(null);
+  const [savedQuizId, setSavedQuizId] = useState<string | null>(null);
+  const startTimeRef = useRef<number | null>(null);
 
   const handleGenerateQuiz = async () => {
     if (inputMode === 'youtube' && !youtubeUrl.trim()) {
@@ -69,6 +75,38 @@ export default function DemoPage() {
       setCurrentQuestionIndex(0);
       setQuizResults([]);
       setShowResults(false);
+      startTimeRef.current = Date.now();
+
+      // Save quiz to database if user is logged in
+      if (user) {
+        const { quizId: savedId, error: saveError } = await saveQuizToDatabase(
+          {
+            title: quiz.title,
+            sourceUrl: inputMode === 'youtube' ? youtubeUrl : null,
+            sourceType: inputMode === 'youtube' ? 'youtube' : 'transcript',
+            topics: quiz.topics || [],
+            numQuestions: quiz.questions.length,
+            coverageMode: mode,
+            createdBy: user.id,
+          },
+          quiz.questions.map((q, idx) => ({
+            questionText: q.question,
+            options: q.options,
+            correctAnswer: q.correctAnswer,
+            explanation: q.explanation,
+            difficulty: (q.difficulty || 'basic') as 'basic' | 'intermediate' | 'advanced',
+            source: (q.source || 'video') as 'video' | 'expanded',
+            orderNum: idx + 1,
+          }))
+        );
+
+        if (saveError) {
+          console.error('Failed to save quiz:', saveError);
+          // Don't show error to user, quiz still works
+        } else {
+          setSavedQuizId(savedId);
+        }
+      }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to generate quiz. Please try again.';
       setError(errorMessage);
@@ -110,6 +148,28 @@ export default function DemoPage() {
       setHasAnswered(false);
     } else {
       setShowResults(true);
+      
+      // Save quiz attempt when completed
+      if (user && savedQuizId && startTimeRef.current) {
+        const score = calculateScore();
+        const timeSpent = Math.round((Date.now() - startTimeRef.current) / 1000);
+        const weakTopics = getNeedsReview();
+        
+        saveQuizAttempt({
+          quizId: savedQuizId,
+          userId: user.id,
+          mode: 'practice',
+          score: score.correctAnswers,
+          totalQuestions: score.total,
+          percentage: score.percentage,
+          timeSpentSeconds: timeSpent,
+          answers: quizResults,
+          weakTopics,
+          instructorVisible: true,
+        }).catch((err) => {
+          console.error('Failed to save quiz attempt:', err);
+        });
+      }
     }
   };
 
@@ -125,6 +185,8 @@ export default function DemoPage() {
     setShowResults(false);
     setQuestions([]);
     setError(null);
+    setSavedQuizId(null);
+    startTimeRef.current = null;
   };
 
   const calculateScore = () => {
@@ -251,6 +313,9 @@ export default function DemoPage() {
                     </label>
                     <p className="text-sm text-gray-600 mb-2">
                       To get transcript from YouTube: Open video → Click "..." → Show Transcript → Copy all text
+                    </p>
+                    <p className="text-sm text-blue-600 font-medium mb-2">
+                      ✓ Timestamps are automatically removed
                     </p>
                     <textarea
                       id="transcript"

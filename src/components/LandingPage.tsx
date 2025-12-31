@@ -42,12 +42,26 @@ export default function LandingPage() {
               <Sparkles className="w-8 h-8 text-blue-900" />
               <h1 className="text-2xl font-bold text-blue-900">SimQuiz AI</h1>
             </div>
-            <Link
-              to="/demo"
-              className="px-6 py-2 bg-blue-900 text-white rounded-lg font-semibold hover:bg-blue-800 transition-colors"
-            >
-              Try Free Demo
-            </Link>
+            <div className="flex items-center space-x-4">
+              <Link
+                to="/login"
+                className="px-4 py-2 text-gray-700 hover:text-blue-900 font-medium transition-colors"
+              >
+                Sign In
+              </Link>
+              <Link
+                to="/signup"
+                className="px-4 py-2 bg-blue-900 text-white rounded-lg font-semibold hover:bg-blue-800 transition-colors"
+              >
+                Sign Up
+              </Link>
+              <Link
+                to="/demo"
+                className="px-6 py-2 border border-blue-900 text-blue-900 rounded-lg font-semibold hover:bg-blue-50 transition-colors"
+              >
+                Try Free Demo
+              </Link>
+            </div>
           </div>
         </div>
       </nav>
