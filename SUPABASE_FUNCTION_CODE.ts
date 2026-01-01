@@ -2,6 +2,13 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
 
 const ANTHROPIC_API_KEY = Deno.env.get('ANTHROPIC_API_KEY')
 
+// Extract video ID from YouTube URL
+function extractVideoId(url: string): string {
+  const match = url.match(/(?:youtu\.be\/|youtube\.com(?:\/embed\/|\/v\/|\/watch\?v=|\/watch\?.+&v=))([^&\n?#]+)/)
+  if (!match?.[1]) throw new Error('Invalid YouTube URL')
+  return match[1]
+}
+
 // Clean timestamps from transcript text
 // Handles formats like: "00:00:15 text", "00:15 text", "[00:00:15] text", "0:09 text", etc.
 function cleanTranscript(transcript: string): string {
@@ -43,6 +50,57 @@ function cleanTranscript(transcript: string): string {
   return cleaned
 }
 
+// Fetch YouTube transcript (server-side, no CORS issues!)
+async function getYouTubeTranscript(videoUrl: string): Promise<string> {
+  const videoId = extractVideoId(videoUrl)
+  
+  try {
+    // Try YouTube's official transcript API
+    const response = await fetch(
+      `https://www.youtube.com/api/timedtext?v=${videoId}&lang=en&fmt=json3`
+    )
+    
+    if (!response.ok) {
+      throw new Error(`YouTube API returned ${response.status}. The video may not have captions enabled.`)
+    }
+    
+    // Get response text first to handle potential parsing issues
+    const responseText = await response.text()
+    
+    // Check if response is empty or not JSON
+    if (!responseText || responseText.trim().length === 0) {
+      throw new Error('YouTube returned an empty response. The video may not have captions available.')
+    }
+    
+    // Try to parse as JSON
+    let data
+    try {
+      data = JSON.parse(responseText)
+    } catch {
+      // If JSON parsing fails, the response might be HTML or XML
+      throw new Error('YouTube transcript API returned invalid data. The video may not have English captions, or the transcript format is not supported. Please use the "Paste Transcript" option instead.')
+    }
+    
+    // Extract transcript from JSON
+    const transcript = data.events
+      ?.filter((e: any) => e.segs)
+      .map((e: any) => e.segs.map((s: any) => s.utf8).join(''))
+      .join(' ') || ''
+    
+    if (!transcript || transcript.trim().length === 0) {
+      throw new Error('No transcript text found in the response. The video may not have captions enabled. Please use the "Paste Transcript" option instead.')
+    }
+    
+    return transcript
+  } catch (error: any) {
+    // Provide helpful error message
+    if (error.message.includes('JSON') || error.message.includes('parse')) {
+      throw new Error('Unable to fetch transcript automatically. Please use the "Paste Transcript" option: 1. Open the YouTube video 2. Click "..." → Show Transcript 3. Copy all text 4. Paste it in the "Paste Transcript" tab')
+    }
+    throw error
+  }
+}
+
 serve(async (req) => {
   // Handle CORS
   if (req.method === 'OPTIONS') {
@@ -69,24 +127,83 @@ serve(async (req) => {
       )
     }
 
-          const body = await req.json()
-          const { transcript, numQuestions, coverageMode, model = 'claude-sonnet-4-20250514', max_tokens = 4000 } = body
+    // Support both old format (prompt) and new format (videoUrl/transcript)
+    const body = await req.json()
+    const { prompt, videoUrl, transcript, numQuestions, coverageMode, model = 'claude-sonnet-4-20250514', max_tokens = 4000 } = body
 
-          if (!transcript) {
-            return new Response(
-              JSON.stringify({ error: 'Transcript is required' }),
-              {
-                status: 400,
-                headers: {
-                  'Content-Type': 'application/json',
-                  'Access-Control-Allow-Origin': '*',
-                },
-              }
-            )
+    // If prompt is provided (old format), use it directly
+    if (prompt) {
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens,
+          messages: [{ role: 'user', content: prompt }],
+        }),
+      })
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        return new Response(
+          JSON.stringify({ error: `Anthropic API error: ${response.status} ${errorText}` }),
+          {
+            status: response.status,
+            headers: {
+              'Content-Type': 'application/json',
+              'Access-Control-Allow-Origin': '*',
+            },
           }
+        )
+      }
 
-          // Clean timestamps from transcript (handles manually pasted transcripts with timestamps)
-          const finalTranscript = cleanTranscript(transcript)
+      const data = await response.json()
+      return new Response(JSON.stringify(data), {
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        },
+      })
+    }
+
+    // New format: fetch transcript if videoUrl provided
+    let finalTranscript = transcript
+    if (videoUrl && !transcript) {
+      try {
+        finalTranscript = await getYouTubeTranscript(videoUrl)
+      } catch (error: any) {
+        return new Response(
+          JSON.stringify({ error: error.message }),
+          {
+            status: 400,
+            headers: {
+              'Content-Type': 'application/json',
+              'Access-Control-Allow-Origin': '*',
+            },
+          }
+        )
+      }
+    }
+
+    if (!finalTranscript) {
+      return new Response(
+        JSON.stringify({ error: 'Either videoUrl or transcript is required' }),
+        {
+          status: 400,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+          },
+        }
+      )
+    }
+
+    // Clean timestamps from transcript (handles manually pasted transcripts with timestamps)
+    finalTranscript = cleanTranscript(finalTranscript)
 
     // Check if transcript is still valid after cleaning
     if (!finalTranscript || finalTranscript.trim().length === 0) {
@@ -133,13 +250,6 @@ VIDEO-ONLY MODE - Generate ${numQuestions} questions:
 - Do NOT ask general knowledge questions
 `}
 
-QUALITY STANDARDS:
-- Questions must be clinically relevant and evidence-based
-- Distractors (wrong answers) should be plausible but clearly incorrect
-- Explanations should teach, not just confirm
-- Mix of recall, application, and analysis questions
-- No "all of the above" or "none of the above" options
-
 Return ONLY valid JSON:
 {
   "title": "Quiz title",
@@ -150,15 +260,12 @@ Return ONLY valid JSON:
       "question": "Question text?",
       "options": ["A) ...", "B) ...", "C) ...", "D) ..."],
       "correctAnswer": 0,
-      "explanation": "Clear explanation that teaches, not just confirms",
-      "difficulty": "basic|intermediate|advanced",
+      "explanation": "Clear explanation",
+      "difficulty": "basic",
       "source": "${isComprehensive ? 'video or expanded' : 'video'}"
     }
   ]
 }
-
-Note: "difficulty" must be "basic", "intermediate", or "advanced"
-Note: "source" must be "video" (from transcript) or "expanded" (broader topic)
 
 Generate ${numQuestions} questions now. No other text.`
 

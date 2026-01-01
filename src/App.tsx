@@ -5,6 +5,8 @@ import Demo from './pages/Demo'
 import Login from './pages/Login'
 import Signup from './pages/Signup'
 import Dashboard from './pages/Dashboard'
+import QuizDetails from './pages/QuizDetails'
+import Pricing from './pages/Pricing'
 import Progress from './pages/Progress'
 
 function App() {
@@ -16,7 +18,9 @@ function App() {
           <Route path="/demo" element={<Demo />} />
           <Route path="/login" element={<Login />} />
           <Route path="/signup" element={<Signup />} />
+          <Route path="/pricing" element={<Pricing />} />
           <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/dashboard/attempt/:id" element={<QuizDetails />} />
           <Route path="/progress" element={<Progress />} />
         </Routes>
       </Router>

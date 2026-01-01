@@ -20,10 +20,9 @@ interface Quiz {
 // This avoids CORS issues and allows YouTube URLs to work automatically!
 
 export async function generateQuiz(
-  videoUrl: string | null,
+  transcript: string,
   numQuestions: number,
-  coverageMode: 'video-content-only' | 'comprehensive',
-  directTranscript?: string
+  coverageMode: 'video-content-only' | 'comprehensive'
 ): Promise<Quiz> {
 
   const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -45,8 +44,7 @@ export async function generateQuiz(
         'apikey': supabaseAnonKey
       },
       body: JSON.stringify({
-        videoUrl: videoUrl || undefined,
-        transcript: directTranscript || undefined,
+        transcript,
         numQuestions,
         coverageMode,
         model: 'claude-sonnet-4-20250514',

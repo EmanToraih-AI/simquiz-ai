@@ -4,6 +4,7 @@ import { Sparkles, Loader2, CheckCircle2, XCircle, ArrowLeft, AlertCircle } from
 import { generateQuiz } from '../utils/quizGenerator';
 import { useAuth } from '../lib/AuthContext';
 import { saveQuizToDatabase, saveQuizAttempt } from '../utils/quizDatabase';
+import { canGenerateQuiz } from '../utils/subscription';
 
 interface Question {
   id: number;
@@ -22,8 +23,6 @@ interface QuizResult {
 
 export default function DemoPage() {
   const { user } = useAuth();
-  const [inputMode, setInputMode] = useState<'youtube' | 'transcript'>('youtube');
-  const [youtubeUrl, setYoutubeUrl] = useState('');
   const [transcript, setTranscript] = useState('');
   const [numQuestions, setNumQuestions] = useState('10');
   const [coverageMode, setCoverageMode] = useState('comprehensive');
@@ -42,13 +41,20 @@ export default function DemoPage() {
   const startTimeRef = useRef<number | null>(null);
 
   const handleGenerateQuiz = async () => {
-    if (inputMode === 'youtube' && !youtubeUrl.trim()) {
-      setError('Please enter a YouTube URL');
+    if (!transcript.trim()) {
+      setError('Please paste a transcript');
       return;
     }
 
-    if (inputMode === 'transcript' && !transcript.trim()) {
-      setError('Please paste a transcript');
+    if (!user) {
+      setError('Please sign in to generate quizzes');
+      return;
+    }
+
+    // Check subscription and quiz limits
+    const { allowed, reason, subscriptionStatus } = await canGenerateQuiz(user.id);
+    if (!allowed) {
+      setError(reason || 'Unable to generate quiz. Please check your subscription.');
       return;
     }
 
@@ -63,10 +69,9 @@ export default function DemoPage() {
     try {
       const mode = coverageMode === 'video-only' ? 'video-content-only' : 'comprehensive';
       const quiz = await generateQuiz(
-        inputMode === 'youtube' ? youtubeUrl : null,
+        transcript,
         parseInt(numQuestions),
-        mode as 'video-content-only' | 'comprehensive',
-        inputMode === 'transcript' ? transcript : undefined
+        mode as 'video-content-only' | 'comprehensive'
       );
 
       setQuestions(quiz.questions);
@@ -82,8 +87,8 @@ export default function DemoPage() {
         const { quizId: savedId, error: saveError } = await saveQuizToDatabase(
           {
             title: quiz.title,
-            sourceUrl: inputMode === 'youtube' ? youtubeUrl : null,
-            sourceType: inputMode === 'youtube' ? 'youtube' : 'transcript',
+            sourceUrl: null,
+            sourceType: 'transcript',
             topics: quiz.topics || [],
             numQuestions: quiz.questions.length,
             coverageMode: mode,
@@ -174,7 +179,6 @@ export default function DemoPage() {
   };
 
   const handleTryAnother = () => {
-    setYoutubeUrl('');
     setTranscript('');
     setQuizStarted(false);
     setQuizTitle('');
@@ -269,64 +273,20 @@ export default function DemoPage() {
 
             <div className="space-y-6">
               <div>
-                <div className="flex space-x-2 mb-4">
-                  <button
-                    onClick={() => setInputMode('youtube')}
-                    className={`flex-1 py-3 px-4 rounded-lg font-semibold transition-all ${
-                      inputMode === 'youtube'
-                        ? 'bg-blue-900 text-white shadow-md'
-                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                    }`}
-                  >
-                    YouTube URL
-                  </button>
-                  <button
-                    onClick={() => setInputMode('transcript')}
-                    className={`flex-1 py-3 px-4 rounded-lg font-semibold transition-all ${
-                      inputMode === 'transcript'
-                        ? 'bg-blue-900 text-white shadow-md'
-                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                    }`}
-                  >
-                    Paste Transcript
-                  </button>
-                </div>
-
-                {inputMode === 'youtube' ? (
-                  <div>
-                    <label htmlFor="youtube-url" className="block text-lg font-semibold text-gray-700 mb-2">
-                      YouTube Video URL
-                    </label>
-                    <input
-                      id="youtube-url"
-                      type="text"
-                      value={youtubeUrl}
-                      onChange={(e) => setYoutubeUrl(e.target.value)}
-                      placeholder="Paste YouTube video URL here"
-                      className="w-full px-4 py-3 border border-gray-300 rounded-lg text-lg focus:ring-2 focus:ring-blue-900 focus:border-transparent transition-all"
-                    />
-                  </div>
-                ) : (
-                  <div>
-                    <label htmlFor="transcript" className="block text-lg font-semibold text-gray-700 mb-2">
-                      Video Transcript
-                    </label>
-                    <p className="text-sm text-gray-600 mb-2">
-                      To get transcript from YouTube: Open video → Click "..." → Show Transcript → Copy all text
-                    </p>
-                    <p className="text-sm text-blue-600 font-medium mb-2">
-                      ✓ Timestamps are automatically removed
-                    </p>
-                    <textarea
-                      id="transcript"
-                      value={transcript}
-                      onChange={(e) => setTranscript(e.target.value)}
-                      placeholder="Paste the video transcript here..."
-                      rows={10}
-                      className="w-full px-4 py-3 border border-gray-300 rounded-lg text-lg focus:ring-2 focus:ring-blue-900 focus:border-transparent transition-all resize-y"
-                    />
-                  </div>
-                )}
+                <label htmlFor="transcript" className="block text-lg font-semibold text-gray-700 mb-2">
+                  Video Transcript
+                </label>
+                <p className="text-sm text-gray-600 mb-2">
+                  To get transcript from YouTube: Open video → Show Transcript → Copy all text
+                </p>
+                <textarea
+                  id="transcript"
+                  value={transcript}
+                  onChange={(e) => setTranscript(e.target.value)}
+                  placeholder="Paste the video transcript here..."
+                  rows={10}
+                  className="w-full px-4 py-3 border border-gray-300 rounded-lg text-lg focus:ring-2 focus:ring-blue-900 focus:border-transparent transition-all resize-y"
+                />
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
@@ -373,9 +333,17 @@ export default function DemoPage() {
               {error && (
                 <div className="flex items-start space-x-3 p-4 bg-red-50 border border-red-200 rounded-lg">
                   <AlertCircle className="w-6 h-6 text-red-600 flex-shrink-0 mt-0.5" />
-                  <div>
+                  <div className="flex-1">
                     <p className="font-semibold text-red-900">Error</p>
                     <p className="text-red-700">{error}</p>
+                    {error.includes('monthly limit') && (
+                      <Link
+                        to="/pricing"
+                        className="inline-block mt-2 px-4 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition-colors"
+                      >
+                        Upgrade to Pro
+                      </Link>
+                    )}
                   </div>
                 </div>
               )}
@@ -388,7 +356,7 @@ export default function DemoPage() {
             <div className="flex flex-col items-center justify-center space-y-6">
               <Loader2 className="w-16 h-16 text-blue-900 animate-spin" />
               <p className="text-xl font-semibold text-gray-700">
-                Fetching transcript and generating quiz...
+                Generating quiz...
               </p>
             </div>
           </div>
